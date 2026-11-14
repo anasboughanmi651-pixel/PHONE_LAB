@@ -1,0 +1,198 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    continue-on-error: true   # informational: a failing test never blocks the Windows build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - name: Fix repository layout (handles flat or nested uploads)
+        shell: python
+        run: |
+          import glob
+          import os
+          import shutil
+          import zipfile
+
+
+          def move(src, dst):
+              if os.path.isfile(src) and not os.path.exists(dst):
+                  os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                  shutil.move(src, dst)
+                  print("moved", src, "->", dst)
+
+
+          print("Files in the repository:")
+          n = 0
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for f in files:
+                  n += 1
+                  if n <= 80:
+                      print("  ", os.path.join(root, f))
+          if not glob.glob("**/phonelab.py", recursive=True):
+              for z in sorted(glob.glob("*.zip") + glob.glob("*/*.zip")):
+                  try:
+                      with zipfile.ZipFile(z) as zf:
+                          if any(x.endswith("phonelab.py") for x in zf.namelist()):
+                              print("extracting", z)
+                              zf.extractall(".")
+                              break
+                  except zipfile.BadZipFile:
+                      print("not a valid zip:", z)
+          if not os.path.isfile("phonelab.py"):
+              for cand in sorted(glob.glob("*/phonelab.py") + glob.glob("*/*/phonelab.py")):
+                  root = os.path.dirname(cand)
+                  print("project found in sub-folder:", root)
+                  for name in os.listdir(root):
+                      if not os.path.exists(name):
+                          shutil.move(os.path.join(root, name), name)
+                  break
+          move("index.html", "ui/index.html")
+          for f in ("test_phonelab.py", "fake_adb.py", "fake_idev.py"):
+              move(f, os.path.join("tests", f))
+          for d in ("ui", "tests", "tools"):
+              os.makedirs(d, exist_ok=True)
+          open(os.path.join("tests", "__init__.py"), "a").close()
+          for need in ("phonelab.py", os.path.join("ui", "index.html")):
+              if not os.path.isfile(need):
+                  raise SystemExit("MISSING FILE in the repository: " + need + "  (upload phonelab-repo.zip to the repository root)")
+          print("layout OK:", sorted(os.listdir(".")))
+      - name: Unit + integration tests (fake adb)
+        run: python -m unittest discover -s tests -v
+
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          architecture: x64
+
+      - name: Fix repository layout (handles flat or nested uploads)
+        shell: python
+        run: |
+          import glob
+          import os
+          import shutil
+          import zipfile
+
+
+          def move(src, dst):
+              if os.path.isfile(src) and not os.path.exists(dst):
+                  os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                  shutil.move(src, dst)
+                  print("moved", src, "->", dst)
+
+
+          print("Files in the repository:")
+          n = 0
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for f in files:
+                  n += 1
+                  if n <= 80:
+                      print("  ", os.path.join(root, f))
+          if not glob.glob("**/phonelab.py", recursive=True):
+              for z in sorted(glob.glob("*.zip") + glob.glob("*/*.zip")):
+                  try:
+                      with zipfile.ZipFile(z) as zf:
+                          if any(x.endswith("phonelab.py") for x in zf.namelist()):
+                              print("extracting", z)
+                              zf.extractall(".")
+                              break
+                  except zipfile.BadZipFile:
+                      print("not a valid zip:", z)
+          if not os.path.isfile("phonelab.py"):
+              for cand in sorted(glob.glob("*/phonelab.py") + glob.glob("*/*/phonelab.py")):
+                  root = os.path.dirname(cand)
+                  print("project found in sub-folder:", root)
+                  for name in os.listdir(root):
+                      if not os.path.exists(name):
+                          shutil.move(os.path.join(root, name), name)
+                  break
+          move("index.html", "ui/index.html")
+          for f in ("test_phonelab.py", "fake_adb.py", "fake_idev.py"):
+              move(f, os.path.join("tests", f))
+          for d in ("ui", "tests", "tools"):
+              os.makedirs(d, exist_ok=True)
+          open(os.path.join("tests", "__init__.py"), "a").close()
+          for need in ("phonelab.py", os.path.join("ui", "index.html")):
+              if not os.path.isfile(need):
+                  raise SystemExit("MISSING FILE in the repository: " + need + "  (upload phonelab-repo.zip to the repository root)")
+          print("layout OK:", sorted(os.listdir(".")))
+
+      - name: Download Google platform-tools (adb)
+        shell: pwsh
+        run: |
+          $ok = $false
+          $urls = @(
+            "https://dl.google.com/android/repository/platform-tools_r34.0.5-windows.zip",
+            "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+          )
+          foreach ($u in $urls) {
+            try { Invoke-WebRequest -Uri $u -OutFile pt.zip -UseBasicParsing; $ok = $true; Write-Host "downloaded $u"; break }
+            catch { Write-Host "failed $u" }
+          }
+          if (-not $ok) { throw "Could not download platform-tools" }
+          Expand-Archive pt.zip -DestinationPath pt
+          New-Item -ItemType Directory -Force -Path tools | Out-Null
+          Copy-Item pt\platform-tools\adb.exe, pt\platform-tools\AdbWinApi.dll, pt\platform-tools\AdbWinUsbApi.dll -Destination tools\
+
+      - name: Get Apple tools (optional, for iPhone support)
+        shell: pwsh
+        env:
+          APPLE_TOOLS_URL: ${{ vars.APPLE_TOOLS_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:APPLE_TOOLS_URL)) {
+            Write-Host "APPLE_TOOLS_URL is not set: building without iPhone tools (Android only)."
+            exit 0
+          }
+          Invoke-WebRequest -Uri $env:APPLE_TOOLS_URL -OutFile apple.zip -UseBasicParsing
+          Expand-Archive apple.zip -DestinationPath apple_tmp
+          New-Item -ItemType Directory -Force -Path tools\apple | Out-Null
+          Get-ChildItem -Recurse apple_tmp | Where-Object { -not $_.PSIsContainer -and ($_.Extension -in ".exe", ".dll") } | ForEach-Object { Copy-Item $_.FullName -Destination tools\apple\ }
+          Get-ChildItem tools\apple
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller==5.13.2
+
+      - name: Build
+        run: pyinstaller --noconfirm --onedir --name PHONELAB --add-data "ui;ui" --add-data "tools;tools" phonelab.py
+
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $o = & .\dist\PHONELAB\PHONELAB.exe --selftest
+          Write-Host $o
+          if ($o -notmatch "tools") { throw "adb.exe was not bundled next to PHONELAB.exe" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if (Test-Path README.md) { Copy-Item README.md dist\PHONELAB\ }
+          Compress-Archive -Path dist\PHONELAB -DestinationPath PHONELAB-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PHONELAB-windows
+          path: PHONELAB-windows.zip
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PHONELAB-windows.zip
